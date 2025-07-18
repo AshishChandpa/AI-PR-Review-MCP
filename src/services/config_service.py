@@ -51,8 +51,8 @@ class ConfigService:
                 },
                 "gemini": {
                     "name": "Google Gemini",
-                    "models": ["gemini-pro", "gemini-pro-vision"],
-                    "default_model": "gemini-pro",
+                    "models": ["gemini-pro", "gemini-pro-vision", "gemini-1.5-flash"],
+                    "default_model": "gemini-1.5-flash",
                     "enabled": bool(settings.API_KEYS.get("gemini")),
                     "description": "Google Gemini models"
                 },

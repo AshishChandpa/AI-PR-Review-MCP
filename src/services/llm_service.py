@@ -64,8 +64,8 @@ class LLMService:
             "gemini": {
                 "class": GeminiProvider,
                 "key": settings.API_KEYS.get("gemini"),
-                "models": ["gemini-pro", "gemini-pro-vision"],
-                "default": "gemini-pro"
+                "models": ["gemini-pro", "gemini-pro-vision", "gemini-1.5-flash"],
+                "default": "gemini-1.5-flash"
             },
             "groq": {
                 "class": GroqProvider,
@@ -164,8 +164,8 @@ Diff:
             },
             "gemini": {
                 "name": "Google Gemini",
-                "models": ["gemini-pro", "gemini-pro-vision"],
-                "default_model": "gemini-pro",
+                "models": ["gemini-pro", "gemini-pro-vision", "gemini-1.5-flash"],
+                "default_model": "gemini-1.5-flash",
                 "description": "Google's Gemini with multimodal capabilities"
             },
             "groq": {

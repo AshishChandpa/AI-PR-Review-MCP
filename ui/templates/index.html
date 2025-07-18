@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Multi-Provider PR Review MCP Server</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="container mt-5">
+        <div class="row">
+            <div class="col-md-10 offset-md-1">
+                <h1 class="text-center mb-4">Multi-Provider PR Review MCP Server</h1>
+
+                <!-- Provider Status Cards -->
+                <div class="row mb-4">
+                    <div class="col-md-6">
+                        <div class="card">
+                            <div class="card-header">
+                                <h6 class="mb-0">📦 Repository Providers</h6>
+                            </div>
+                            <div class="card-body">
+                                {% for provider, status in repo_provider_status.items() %}
+                                <div class="d-flex justify-content-between align-items-center mb-2">
+                                    <span>{{ status.name }}</span>
+                                    {% if status.available %}
+                                        <span class="badge bg-success">Available</span>
+                                    {% else %}
+                                        <span class="badge bg-warning">{{ status.error[:30] }}...</span>
+                                    {% endif %}
+                                </div>
+                                {% endfor %}
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="card">
+                            <div class="card-header">
+                                <h6 class="mb-0">🤖 LLM Providers</h6>
+                            </div>
+                            <div class="card-body">
+                                {% for provider_id, provider_info in llm_providers.items() %}
+                                <div class="d-flex justify-content-between align-items-center mb-2">
+                                    <span>{{ provider_info.name }}</span>
+                                    {% if provider_info.enabled %}
+                                        <span class="badge bg-success">Available</span>
+                                    {% else %}
+                                        <span class="badge bg-warning">{{ provider_info.status }}</span>
+                                    {% endif %}
+                                </div>
+                                {% endfor %}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Info Card -->
+                <div class="card mb-4">
+                    <div class="card-body">
+                        <h6 class="card-title">📋 Repository Owner Examples:</h6>
+                        <div class="row">
+                            <div class="col-md-6">
+                                <p class="mb-1"><strong>GitHub:</strong></p>
+                                <small class="text-muted">
+                                    • <code>microsoft</code> (for microsoft/vscode)<br>
+                                    • <code>facebook</code> (for facebook/react)<br>
+                                    • <code>your-username</code> (for your repos)
+                                </small>
+                            </div>
+                            <div class="col-md-6">
+                                <p class="mb-1"><strong>Bitbucket:</strong></p>
+                                <small class="text-muted">
+                                    • <code>atlassian</code> (for atlassian/example)<br>
+                                    • <code>your-workspace</code> (for your repos)
+                                </small>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-body">
+                        <h5 class="card-title">Review a Pull Request</h5>
+                        <form id="reviewForm">
+                            <div class="row mb-3">
+                                <div class="col-md-6">
+                                    <label for="repo_provider" class="form-label">Repository Provider</label>
+                                    <select class="form-select" id="repo_provider" name="repo_provider" required>
+                                        {% for provider in repo_providers %}
+                                            <option value="{{ provider }}">{{ provider.title() }}</option>
+                                        {% endfor %}
+                                    </select>
+                                </div>
+                                <div class="col-md-6">
+                                    <label for="llm_provider" class="form-label">LLM Provider</label>
+                                    <select class="form-select" id="llm_provider" name="llm_provider" required>
+                                        {% for provider_id, provider_info in llm_providers.items() %}
+                                            {% if provider_info.enabled %}
+                                                <option value="{{ provider_id }}">{{ provider_info.name }}</option>
+                                            {% endif %}
+                                        {% endfor %}
+                                    </select>
+                                </div>
+                            </div>
+
+                            <div class="row mb-3">
+                                <div class="col-md-6">
+                                    <label for="owner" class="form-label">
+                                        Repository Owner
+                                        <span class="text-muted small">(username/organization)</span>
+                                    </label>
+                                    <input type="text" class="form-control" id="owner" name="owner"
+                                           placeholder="e.g., microsoft, facebook, your-username" required>
+                                </div>
+                                <div class="col-md-6">
+                                    <label for="repo" class="form-label">
+                                        Repository Name
+                                        <span class="text-muted small">(repo name only)</span>
+                                    </label>
+                                    <input type="text" class="form-control" id="repo" name="repo"
+                                           placeholder="e.g., vscode, react, my-project" required>
+                                </div>
+                            </div>
+
+                            <div class="row mb-3">
+                                <div class="col-md-6">
+                                    <label for="pr_number" class="form-label">PR Number</label>
+                                    <input type="number" class="form-control" id="pr_number" name="pr_number"
+                                           placeholder="e.g., 123" required>
+                                </div>
+                                <div class="col-md-6">
+                                    <label for="review_type" class="form-label">Review Type</label>
+                                    <select class="form-select" id="review_type" name="review_type">
+                                        <option value="comprehensive">Comprehensive Review</option>
+                                        <option value="security">Security Focus</option>
+                                        <option value="performance">Performance Focus</option>
+                                        <option value="style">Style & Best Practices</option>
+                                    </select>
+                                </div>
+                            </div>
+
+                            <div class="row mb-3">
+                                <div class="col-md-6">
+                                    <label for="model" class="form-label">Model</label>
+                                    <select class="form-select" id="model" name="model">
+                                        <option value="">Auto (Default)</option>
+                                    </select>
+                                </div>
+                                <div class="col-md-6 d-flex align-items-end">
+                                    <button type="button" class="btn btn-outline-info w-100" id="refreshBtn">
+                                        🔄 Refresh Providers
+                                    </button>
+                                </div>
+                            </div>
+
+                            <button type="submit" class="btn btn-primary btn-lg w-100">
+                                <span class="spinner-border spinner-border-sm d-none" id="loadingSpinner"></span>
+                                🔍 Review Pull Request
+                            </button>
+                        </form>
+                    </div>
+                </div>
+
+                <div id="reviewResult" class="mt-4" style="display: none;">
+                    <div class="card">
+                        <div class="card-body">
+                            <h5 class="card-title">Review Results</h5>
+                            <div id="reviewContent"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            const reviewForm = document.getElementById('reviewForm');
+            const llmProviderSelect = document.getElementById('llm_provider');
+            const modelSelect = document.getElementById('model');
+            const loadingSpinner = document.getElementById('loadingSpinner');
+            const reviewResult = document.getElementById('reviewResult');
+            const reviewContent = document.getElementById('reviewContent');
+            const refreshBtn = document.getElementById('refreshBtn');
+
+            // Load models when LLM provider changes
+            llmProviderSelect.addEventListener('change', function() {
+                updateModels();
+            });
+
+            // Initial model load
+            updateModels();
+
+            async function updateModels() {
+                const selectedProvider = llmProviderSelect.value;
+                if (!selectedProvider) return;
+
+                try {
+                    const response = await fetch(`/api/models/${selectedProvider}`);
+                    const data = await response.json();
+
+                    modelSelect.innerHTML = '<option value="">Auto (Default)</option>';
+
+                    if (data.models) {
+                        data.models.forEach(model => {
+                            const option = document.createElement('option');
+                            option.value = model;
+                            option.textContent = model;
+                            if (model === data.default_model) {
+                                option.selected = true;
+                            }
+                            modelSelect.appendChild(option);
+                        });
+                    }
+                } catch (error) {
+                    console.error('Error loading models:', error);
+                }
+            }
+
+            // Handle form submission
+            reviewForm.addEventListener('submit', async function(e) {
+                e.preventDefault();
+
+                const formData = new FormData(reviewForm);
+
+                // Show loading state
+                loadingSpinner.classList.remove('d-none');
+                reviewResult.style.display = 'none';
+
+                try {
+                    const response = await fetch('/api/review', {
+                        method: 'POST',
+                        body: formData
+                    });
+
+                    const result = await response.json();
+
+                    if (result.success) {
+                        displayReview(result);
+                    } else {
+                        showError(result.error);
+                    }
+                } catch (error) {
+                    showError('Failed to review PR: ' + error.message);
+                } finally {
+                    loadingSpinner.classList.add('d-none');
+                }
+            });
+
+            // Handle refresh button
+            refreshBtn.addEventListener('click', function() {
+                location.reload();
+            });
+
+            function displayReview(result) {
+                const html = `
+                    <div class="review-header mb-3">
+                        <h6>${result.pr_info.title}</h6>
+                        <div class="d-flex justify-content-between text-muted small">
+                            <span>📁 Files: ${result.pr_info.files_changed}</span>
+                            <span>➕${result.pr_info.additions} ➖${result.pr_info.deletions}</span>
+                            <span>🔗 ${result.pr_info.provider}</span>
+                            <span>🤖 ${result.llm_provider}</span>
+                        </div>
+                        <div class="mt-2">
+                            <a href="${result.pr_info.url}" target="_blank" class="btn btn-sm btn-outline-primary">
+                                View PR 🔗
+                            </a>
+                        </div>
+                    </div>
+                    <div class="review-content">
+                        <pre class="bg-light p-3 rounded" style="white-space: pre-wrap;">${result.review}</pre>
+                    </div>
+                `;
+
+                reviewContent.innerHTML = html;
+                reviewResult.style.display = 'block';
+            }
+
+            function showError(message) {
+                reviewContent.innerHTML = `
+                    <div class="alert alert-danger" role="alert">
+                        <strong>Error:</strong> ${message}
+                    </div>
+                `;
+                reviewResult.style.display = 'block';
+            }
+        });
+    </script>
+</body>
+</html>

@@ -1,0 +1,20 @@
+{
+  "providers": {
+    "github": {
+      "name": "GitHub",
+      "base_url": "https://api.github.com",
+      "enabled": true,
+      "description": "GitHub repository hosting service",
+      "auth_type": "token",
+      "pr_url_pattern": "https://github.com/{owner}/{repo}/pull/{pr_number}"
+    },
+    "bitbucket": {
+      "name": "Bitbucket",
+      "base_url": "https://api.bitbucket.org/2.0",
+      "enabled": true,
+      "description": "Bitbucket repository hosting service",
+      "auth_type": "app_password",
+      "pr_url_pattern": "https://bitbucket.org/{owner}/{repo}/pull-requests/{pr_number}"
+    }
+  }
+}

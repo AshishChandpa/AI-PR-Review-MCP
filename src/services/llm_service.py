@@ -1,3 +1,4 @@
+import json
 import sys
 import os
 from pathlib import Path
@@ -211,3 +212,77 @@ Diff:
             }
 
         return provider_info
+
+    def _generate_inline_review_prompt(self, pr_data: PRData, review_type: str) -> str:
+        """
+        Prompt for both general and inline feedback.
+        """
+        return f"""
+    --- INSTRUCTIONS ---
+    Act as an expert code reviewer.
+
+    1. Give a high-level review as 'general_comment'.
+    2. For each specific file and line you think needs feedback, output an inline suggestion as an item in the list 'inline_comments' (JSON format). 
+       Each item must have: file (str), line (int), comment (str).
+
+    Respond ONLY with a valid JSON object:
+    {{
+      "general_comment": "...",
+      "inline_comments": [
+        {{"file": "...", "line": 17, "comment": "..."}},
+        {{"file": "...", "line": 25, "comment": "..."}}
+      ]
+    }}
+
+    --- PR DATA ---
+    Title: {pr_data.title}
+    Description: {pr_data.description or "No description provided"}
+    Files changed: {pr_data.files_changed}
+    Additions: {pr_data.additions}
+    Deletions: {pr_data.deletions}
+
+    Diff:
+    {pr_data.diff}
+
+    Review type (focus): {review_type}
+    """
+
+    async def review_inline_pr(self, pr_data: PRData, provider_name: str, model: str = None,
+                        review_type: str = "comprehensive") -> dict:
+        """
+        Returns {
+            "general_comment": "...",
+            "inline_comments": [
+                {"file": "...", "line": 99, "comment": "..."},
+                ...
+            ]
+        }
+        """
+        if provider_name not in self.providers:
+            raise ValueError(f"Provider '{provider_name}' not available or not configured")
+        provider = self.providers[provider_name]
+        prompt = self._generate_review_prompt(pr_data, review_type)
+        review_content = await provider.analyze_pr(prompt, model)
+
+        try:
+            feedback = json.loads(review_content)
+            # Defensive: enforce required structure
+            general_comment = feedback.get("general_comment", "")
+            inline_comments = feedback.get("inline_comments", [])
+            if not isinstance(inline_comments, list):
+                inline_comments = []
+        except Exception as e:
+            # Invalid JSON or not in spec. Fallback to general comment only.
+            general_comment = review_content
+            inline_comments = []
+
+        # Return both sections, ready for posting as Bitbucket comments
+        return {
+            "general_comment": general_comment,
+            "inline_comments": inline_comments,
+            "provider": provider_name,
+            "model": model or provider.get_default_model(),
+            "review_type": review_type
+        }
+
+

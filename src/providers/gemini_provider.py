@@ -28,4 +28,4 @@ class GeminiProvider(BaseProvider):
             raise Exception(f"Gemini API error: {str(e)}")
 
     def get_default_model(self) -> str:
-        return "gemini-pro"
+        return "gemini-2.5-pro"

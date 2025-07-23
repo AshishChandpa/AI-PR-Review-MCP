@@ -1,48 +1,56 @@
 import requests
-
-from config.settings import settings
-from src.models.pr_data import PRData
-from src.utils.logger import get_logger
+from atlassian.bitbucket import Cloud
+from typing import Optional
 from .base_repo_service import BaseRepoService
+from src.models.pr_data import PRData
+from config.settings import settings
+from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 
 class BitbucketService(BaseRepoService):
-    API_BASE = "https://api.bitbucket.org/2.0/repositories"
-
     def __init__(self):
         if not settings.BITBUCKET_USERNAME or not settings.BITBUCKET_APP_PASSWORD:
             raise ValueError(
-                "Bitbucket credentials are required. Set BITBUCKET_USERNAME and BITBUCKET_APP_PASSWORD environment variables."
-            )
+                "Bitbucket credentials are required. Set BITBUCKET_USERNAME and BITBUCKET_APP_PASSWORD environment variables.")
+
         self.username = settings.BITBUCKET_USERNAME
         self.app_password = settings.BITBUCKET_APP_PASSWORD
+        self.bitbucket = Cloud(
+            username=self.username,
+            password=self.app_password,
+            cloud=True
+        )
 
     async def get_pr_diff(self, owner: str, repo: str, pr_number: int) -> PRData:
-        # Auth tuple for requests
-        auth = (self.username, self.app_password)
-        repo_slug = repo  # Bitbucket calls this repo_slug
-
-        # Get PR data
-        pr_url = f"{self.API_BASE}/{owner}/{repo_slug}/pullrequests/{pr_number}"
-        diff_url = f"{pr_url}/diff"
+        """Get PR data including diff from Bitbucket"""
         try:
-            pr_resp = requests.get(pr_url, auth=auth)
-            pr_resp.raise_for_status()
-            pr_data = pr_resp.json()
+            # Get PR details
+            pr_data = self.bitbucket.repositories.get_pullrequest(
+                owner, repo, pr_number
+            )
 
-            diff_resp = requests.get(diff_url, auth=auth)
-            diff_resp.raise_for_status()
-            diff_content = diff_resp.text
+            # Get PR diff
+            diff_response = self.bitbucket.repositories.get_pullrequest_diff(
+                owner, repo, pr_number
+            )
 
-            # Stats extraction
-            files_changed, additions, deletions = self._parse_diff_stats(diff_content)
+            # Get PR commits to calculate stats
+            commits = self.bitbucket.repositories.get_pullrequest_commits(
+                owner, repo, pr_number
+            )
+
+            # Calculate additions and deletions from diff
+            additions, deletions = self._calculate_diff_stats(diff_response)
+
+            # Count changed files
+            files_changed = self._count_changed_files(diff_response)
 
             return PRData(
-                title=pr_data.get("title", ""),
-                description=pr_data.get("description", ""),
-                diff=diff_content,
+                title=pr_data.get('title', ''),
+                description=pr_data.get('description', ''),
+                diff=diff_response,
                 files_changed=files_changed,
                 additions=additions,
                 deletions=deletions,
@@ -51,30 +59,46 @@ class BitbucketService(BaseRepoService):
                 repo=repo,
                 provider="bitbucket"
             )
+
         except Exception as e:
             logger.error(f"Error fetching Bitbucket PR data: {str(e)}")
             raise
 
-    def _parse_diff_stats(self, diff_content: str):
-        additions = deletions = files_changed = 0
-        files = set()
-        for line in diff_content.splitlines():
-            if line.startswith('diff --git'):
-                files.add(line)
-                files_changed += 1
-            elif line.startswith('+') and not line.startswith('+++'):
+    def _calculate_diff_stats(self, diff_content: str) -> tuple:
+        """Calculate additions and deletions from diff content"""
+        additions = 0
+        deletions = 0
+
+        for line in diff_content.split('\n'):
+            if line.startswith('+') and not line.startswith('+++'):
                 additions += 1
             elif line.startswith('-') and not line.startswith('---'):
                 deletions += 1
-        return files_changed, additions, deletions
+
+        return additions, deletions
+
+    def _count_changed_files(self, diff_content: str) -> int:
+        """Count number of changed files from diff"""
+        files = set()
+
+        for line in diff_content.split('\n'):
+            if line.startswith('diff --git'):
+                # Extract filename from diff header
+                parts = line.split()
+                if len(parts) >= 4:
+                    files.add(parts[3])  # b/filename
+
+        return len(files)
 
     async def validate_credentials(self) -> bool:
-        url = f"{self.API_BASE}/{self.username}?pagelen=1"
+        """Validate Bitbucket credentials"""
         try:
-            resp = requests.get(url, auth=(self.username, self.app_password))
-            return resp.status_code == 200
+            # Try to get user info to validate credentials
+            user_info = self.bitbucket.user.get()
+            return user_info is not None
         except Exception:
             return False
 
     def get_pr_url(self, owner: str, repo: str, pr_number: int) -> str:
+        """Generate Bitbucket PR URL"""
         return f"https://bitbucket.org/{owner}/{repo}/pull-requests/{pr_number}"

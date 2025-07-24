@@ -1,6 +1,5 @@
 import requests
 from atlassian.bitbucket import Cloud
-from typing import Optional
 from .base_repo_service import BaseRepoService
 from src.models.pr_data import PRData
 from config.settings import settings
@@ -117,3 +116,21 @@ class BitbucketService(BaseRepoService):
         response = requests.post(url, auth=self.auth, json=body)
         response.raise_for_status()
         return response.json()
+
+    def get_pr_commits(self, owner, repo, pr_number):
+        """
+        Fetch all commits for a given PR.
+        """
+        url = f"{self.api_url}/repositories/{owner}/{repo}/pullrequests/{pr_number}/commits"
+        response = requests.get(url, auth=self.auth)
+        response.raise_for_status()
+        return response.json().get("values", [])
+
+    def get_commit_diff(self, owner, repo, commit_hash):
+        """
+        Fetch the diff for a single commit.
+        """
+        url = f"{self.api_url}/repositories/{owner}/{repo}/diff/{commit_hash}"
+        response = requests.get(url, auth=self.auth)
+        response.raise_for_status()
+        return response.text

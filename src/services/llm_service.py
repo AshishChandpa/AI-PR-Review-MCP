@@ -218,34 +218,51 @@ Diff:
         Prompt for both general and inline feedback.
         """
         return f"""
-    --- INSTRUCTIONS ---
-    Act as an expert code reviewer.
+You are an expert software engineer and code reviewer.
 
-    1. Give a high-level review as 'general_comment'.
-    2. For each specific file and line you think needs feedback, output an inline suggestion as an item in the list 'inline_comments' (JSON format). 
-       Each item must have: file (str), line (int), comment (str).
+--- OBJECTIVE ---
+Given a pull request, provide:
+1. A high-level review comment as `"general_comment"`.
+2. Inline comments for specific lines of code that require attention, as a list under `"inline_comments"`.
 
-    Respond ONLY with a valid JSON object:
+Each inline comment must be a JSON object with:
+- "file": filename (string),
+- "line": line number (int),
+- "comment": review message (string)
+
+--- OUTPUT FORMAT ---
+Respond with **only a valid JSON object**, using the following structure:
+
+{{
+  "general_comment": "High-level review here.",
+  "inline_comments": [
     {{
-      "general_comment": "...",
-      "inline_comments": [
-        {{"file": "...", "line": 17, "comment": "..."}},
-        {{"file": "...", "line": 25, "comment": "..."}}
-      ]
-    }}
+      "file": "example.py",
+      "line": 12,
+      "comment": "This could be refactored for clarity."
+    }},
+    ...
+  ]
+}}
 
-    --- PR DATA ---
-    Title: {pr_data.title}
-    Description: {pr_data.description or "No description provided"}
-    Files changed: {pr_data.files_changed}
-    Additions: {pr_data.additions}
-    Deletions: {pr_data.deletions}
+--- PULL REQUEST DATA ---
 
-    Diff:
-    {pr_data.diff}
+Title: {pr_data.title}
+Description: {pr_data.description or "No description provided"}
+Files Changed: {pr_data.files_changed}
+Additions: {pr_data.additions}
+Deletions: {pr_data.deletions}
 
-    Review type (focus): {review_type}
-    """
+--- DIFF START ---
+{pr_data.diff}
+--- DIFF END ---
+
+--- REVIEW TYPE ---
+Focus on: {review_type}
+
+Be precise, helpful, and return only the JSON object as your entire response.
+"""
+
 
     async def review_inline_pr(self, pr_data: PRData, provider_name: str, model: str = None,
                         review_type: str = "comprehensive") -> dict:
@@ -261,11 +278,12 @@ Diff:
         if provider_name not in self.providers:
             raise ValueError(f"Provider '{provider_name}' not available or not configured")
         provider = self.providers[provider_name]
-        prompt = self._generate_review_prompt(pr_data, review_type)
+
+        prompt = self._generate_inline_review_prompt(pr_data, review_type)
         review_content = await provider.analyze_pr(prompt, model)
 
         try:
-            feedback = json.loads(review_content)
+            feedback = provider.extract_json_from_block(review_content)
             # Defensive: enforce required structure
             general_comment = feedback.get("general_comment", "")
             inline_comments = feedback.get("inline_comments", [])

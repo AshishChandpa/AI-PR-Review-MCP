@@ -88,7 +88,7 @@ async def review_and_comment(owner, repo, pr_number):
             print("Posted general comment.")
 
         # Post each inline comment
-        for c in review_result["inline_comments"]:
+        for c in review_result.get("inline_comments", []):
             if all(k in c for k in ("file", "line", "comment")):
                 url = f"https://api.bitbucket.org/2.0/repositories/{owner}/{repo}/pullrequests/{pr_number}/comments"
                 data = {

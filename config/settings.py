@@ -24,7 +24,7 @@ class Settings:
     SUPPORTED_REPO_PROVIDERS = ["github", "bitbucket"]
 
     # Default LLM Provider
-    DEFAULT_LLM_PROVIDER = "openai"
+    DEFAULT_LLM_PROVIDER = "gemini"
 
     # API Keys
     API_KEYS = {

@@ -16,8 +16,8 @@
     },
     "gemini": {
       "name": "Google Gemini",
-      "models": ["gemini-pro", "gemini-pro-vision"],
-      "default_model": "gemini-pro",
+      "models": ["gemini-pro", "gemini-pro-vision", "gemini-2.5-pro"],
+      "default_model": "gemini-2.5-pro",
       "enabled": true,
       "description": "Google's Gemini with multimodal capabilities"
     },

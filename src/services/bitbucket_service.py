@@ -1,6 +1,5 @@
 import requests
 from atlassian.bitbucket import Cloud
-from typing import Optional
 from .base_repo_service import BaseRepoService
 from src.models.pr_data import PRData
 from config.settings import settings
@@ -22,47 +21,46 @@ class BitbucketService(BaseRepoService):
             password=self.app_password,
             cloud=True
         )
+        self.api_url = "https://api.bitbucket.org/2.0"
+        self.auth = (self.username, self.app_password)
 
     async def get_pr_diff(self, owner: str, repo: str, pr_number: int) -> PRData:
-        """Get PR data including diff from Bitbucket"""
-        try:
-            # Get PR details
-            pr_data = self.bitbucket.repositories.get_pullrequest(
-                owner, repo, pr_number
-            )
+        """Get PR data and diff from Bitbucket Cloud via direct REST"""
+        base_url = f"https://api.bitbucket.org/2.0/repositories/{owner}/{repo}"
+        auth = (self.username, self.app_password)
 
-            # Get PR diff
-            diff_response = self.bitbucket.repositories.get_pullrequest_diff(
-                owner, repo, pr_number
-            )
+        # Pull request main data
+        pr_url = f"{base_url}/pullrequests/{pr_number}"
+        pr_resp = requests.get(pr_url, auth=auth)
+        pr_resp.raise_for_status()
+        pr_data_json = pr_resp.json()
 
-            # Get PR commits to calculate stats
-            commits = self.bitbucket.repositories.get_pullrequest_commits(
-                owner, repo, pr_number
-            )
+        # Pull request diff (text)
+        diff_url = f"{base_url}/pullrequests/{pr_number}/diff"
+        diff_resp = requests.get(diff_url, auth=auth)
+        diff_resp.raise_for_status()
+        diff = diff_resp.text
 
-            # Calculate additions and deletions from diff
-            additions, deletions = self._calculate_diff_stats(diff_response)
+        title = pr_data_json.get('title', '')
+        description = pr_data_json.get('description', '')
+        # Optional: fetch more stats, e.g., files_changed, additions, deletions
+        # Minimal example:
+        files_changed = pr_data_json.get('changed_files', 0)
+        additions = pr_data_json.get('additions', 0)
+        deletions = pr_data_json.get('deletions', 0)
 
-            # Count changed files
-            files_changed = self._count_changed_files(diff_response)
-
-            return PRData(
-                title=pr_data.get('title', ''),
-                description=pr_data.get('description', ''),
-                diff=diff_response,
-                files_changed=files_changed,
-                additions=additions,
-                deletions=deletions,
-                number=pr_number,
-                owner=owner,
-                repo=repo,
-                provider="bitbucket"
-            )
-
-        except Exception as e:
-            logger.error(f"Error fetching Bitbucket PR data: {str(e)}")
-            raise
+        return PRData(
+            title=title,
+            description=description,
+            diff=diff,
+            files_changed=files_changed,
+            additions=additions,
+            deletions=deletions,
+            number=pr_number,
+            owner=owner,
+            repo=repo,
+            provider="bitbucket"
+        )
 
     def _calculate_diff_stats(self, diff_content: str) -> tuple:
         """Calculate additions and deletions from diff content"""
@@ -102,3 +100,37 @@ class BitbucketService(BaseRepoService):
     def get_pr_url(self, owner: str, repo: str, pr_number: int) -> str:
         """Generate Bitbucket PR URL"""
         return f"https://bitbucket.org/{owner}/{repo}/pull-requests/{pr_number}"
+
+    async def add_inline_comment(self, owner, repo, pr_number, file_path, line, comment_text):
+        """
+        Post an inline comment to a specific file and line in a PR.
+        """
+        url = f"{self.api_url}/repositories/{owner}/{repo}/pullrequests/{pr_number}/comments"
+        body = {
+            "content": {"raw": comment_text},
+            "inline": {
+                "path": file_path,
+                "to": line  # Or use "from": line for old, "to": for new line context
+            }
+        }
+        response = requests.post(url, auth=self.auth, json=body)
+        response.raise_for_status()
+        return response.json()
+
+    def get_pr_commits(self, owner, repo, pr_number):
+        """
+        Fetch all commits for a given PR.
+        """
+        url = f"{self.api_url}/repositories/{owner}/{repo}/pullrequests/{pr_number}/commits"
+        response = requests.get(url, auth=self.auth)
+        response.raise_for_status()
+        return response.json().get("values", [])
+
+    def get_commit_diff(self, owner, repo, commit_hash):
+        """
+        Fetch the diff for a single commit.
+        """
+        url = f"{self.api_url}/repositories/{owner}/{repo}/diff/{commit_hash}"
+        response = requests.get(url, auth=self.auth)
+        response.raise_for_status()
+        return response.text

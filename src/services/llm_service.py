@@ -1,3 +1,4 @@
+import json
 import sys
 import os
 from pathlib import Path
@@ -211,3 +212,117 @@ Diff:
             }
 
         return provider_info
+
+    def _generate_inline_review_prompt(self, pr_data: PRData, review_type: str) -> str:
+        """
+        Prompt for both general and inline feedback.
+        """
+        return f"""
+You are an expert software engineer and code reviewer.
+
+--- OBJECTIVE ---
+Given a pull request, provide:
+1. A high-level review comment as `"general_comment"`.
+2. Inline comments for specific lines of code that require attention, as a list under `"inline_comments"`.
+
+Each inline comment must be a JSON object with:
+- "file": filename (string),
+- "line": line number (int),
+- "comment": review message (string)
+
+--- OUTPUT FORMAT ---
+Respond with **only a valid JSON object**, using the following structure:
+
+{{
+  "general_comment": "High-level review here.",
+  "inline_comments": [
+    {{
+      "file": "example.py",
+      "line": 12,
+      "comment": "This could be refactored for clarity."
+    }},
+    ...
+  ]
+}}
+
+--- PULL REQUEST DATA ---
+
+Title: {pr_data.title}
+Description: {pr_data.description or "No description provided"}
+Files Changed: {pr_data.files_changed}
+Additions: {pr_data.additions}
+Deletions: {pr_data.deletions}
+
+--- DIFF START ---
+{pr_data.diff}
+--- DIFF END ---
+
+--- REVIEW TYPE ---
+Focus on: {review_type}
+
+Be precise, helpful, and return only the JSON object as your entire response.
+"""
+
+
+    async def review_inline_pr(self, pr_data: PRData, provider_name: str, model: str = None,
+                        review_type: str = "comprehensive") -> dict:
+        """
+        Returns {
+            "general_comment": "...",
+            "inline_comments": [
+                {"file": "...", "line": 99, "comment": "..."},
+                ...
+            ]
+        }
+        """
+        if provider_name not in self.providers:
+            raise ValueError(f"Provider '{provider_name}' not available or not configured")
+        provider = self.providers[provider_name]
+
+        prompt = self._generate_inline_review_prompt(pr_data, review_type)
+        review_content = await provider.analyze_pr(prompt, model)
+
+        try:
+            feedback = provider.extract_json_from_block(review_content)
+            # Defensive: enforce required structure
+            general_comment = feedback.get("general_comment", "")
+            inline_comments = feedback.get("inline_comments", [])
+            if not isinstance(inline_comments, list):
+                inline_comments = []
+        except Exception as e:
+            # Invalid JSON or not in spec. Fallback to general comment only.
+            general_comment = review_content
+            inline_comments = []
+
+        # Return both sections, ready for posting as Bitbucket comments
+        return {
+            "general_comment": general_comment,
+            "inline_comments": inline_comments,
+            "provider": provider_name,
+            "model": model or provider.get_default_model(),
+            "review_type": review_type
+        }
+
+    async def get_suggestions(self, pr_data, prompt: str):
+        """Generate code suggestions"""
+        full_prompt = f"{prompt}\n\nPR Diff:\n{pr_data.diff_text} \n\n Provide code suggestions based on the changes made in this PR."
+        provider = self.providers[settings.DEFAULT_LLM_PROVIDER]
+        # Use your existing LLM call logic
+        response = await provider.analyze_pr(full_prompt)
+        return response
+
+    async def explain_changes(self, pr_data, prompt: str):
+        """Explain PR changes"""
+        full_prompt = f"{prompt}\n\nPR Diff:\n{pr_data.diff}\n\n Provide a detailed explanation of the changes made in this PR."
+        provider = self.providers[settings.DEFAULT_LLM_PROVIDER]
+        response = await provider.analyze_pr(full_prompt)
+        return response
+
+    async def security_analysis(self, pr_data):
+        """Perform security analysis"""
+        full_prompt = f"Analyze this code diff for security vulnerabilities, potential security issues, and provide recommendations:\n\n{pr_data.diff_text}"
+        provider = self.providers[settings.DEFAULT_LLM_PROVIDER]
+        response = await provider.analyze_pr(full_prompt)
+        return response
+
+

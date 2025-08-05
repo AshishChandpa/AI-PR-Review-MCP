@@ -1,294 +1,690 @@
-from fastapi import FastAPI, Request, BackgroundTasks
-from fastapi.responses import JSONResponse
-from typing import Optional
-
-
-from src.services.llm_service import LLMService
-
-import requests
-from config.settings import settings
-from src.services.repo_service_factory import RepoServiceFactory
+"""
+Bitbucket AI Assistant Webhook Handler
+Similar to GitHub Copilot - provides intelligent PR reviews and interactive assistance
+"""
 
 import logging
+from typing import Optional, Dict, Any, List
+from dataclasses import dataclass
+from enum import Enum
+import asyncio
 
-app = FastAPI()
+import requests
+from fastapi import FastAPI, Request, BackgroundTasks, HTTPException
+from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 
+from config.settings import settings
+from src.services.llm_service import LLMService
+from src.services.repo_service_factory import RepoServiceFactory
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Initialize FastAPI app
+app = FastAPI(
+    title="Bitbucket AI Assistant",
+    description="AI-powered code review assistant for Bitbucket repositories",
+    version="1.0.0"
+)
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Initialize services
 llm_service = LLMService()
 
-def extract_info(payload: dict) -> Optional[dict]:
-    """Extracts workspace, repo_slug, pr_id if possible. Returns None if not a valid PR webhook."""
-    pr = payload.get("pullrequest", {})
-    repo = payload.get("repository", {})
-    workspace = (
-        repo.get("workspace", {}).get("slug")
-        or repo.get("project", {}).get("key")
-        or repo.get("owner", {}).get("username")
-    )
-    repo_slug = repo.get("slug") or repo.get("name")
-    pr_id = pr.get("id")
-    if workspace and repo_slug and pr_id:
-        return {
-            "workspace": workspace,
-            "repo_slug": repo_slug,
-            "pr_id": pr_id
+
+class EventType(Enum):
+    """Bitbucket webhook event types we handle"""
+    PR_CREATED = "pullrequest:created"
+    PR_UPDATED = "pullrequest:updated"
+    PR_APPROVED = "pullrequest:approved"
+    PR_COMMENT_CREATED = "pullrequest:comment_created"
+    PR_COMMENT_UPDATED = "pullrequest:comment_updated"
+
+
+class AssistantCommand(Enum):
+    """Available assistant commands"""
+    REVIEW = "review"
+    SUGGESTION = "suggestion"
+    EXPLAIN = "explain"
+    SECURITY = "security"
+    HELP = "help"
+    SUMMARIZE = "summarize"
+    TEST = "test"
+
+
+@dataclass
+class PullRequestInfo:
+    """Pull request information extracted from webhook"""
+    workspace: str
+    repo_slug: str
+    pr_id: int
+
+    def __str__(self) -> str:
+        return f"{self.workspace}/{self.repo_slug}/pull-requests/{self.pr_id}"
+
+
+@dataclass
+class CommentInfo:
+    """Comment information extracted from webhook"""
+    workspace: str
+    repo_slug: str
+    pr_id: int
+    comment_text: str
+    comment_id: int
+    author: str = ""
+
+    def __str__(self) -> str:
+        return f"Comment {self.comment_id} on PR {self.pr_id}"
+
+
+class WebhookProcessor:
+    """Handles webhook processing logic"""
+
+    @staticmethod
+    def extract_pr_info(payload: Dict[str, Any]) -> Optional[PullRequestInfo]:
+        """
+        Extract PR information from Bitbucket webhook payload
+
+        Args:
+            payload: Webhook payload from Bitbucket
+
+        Returns:
+            PullRequestInfo if valid PR data found, None otherwise
+        """
+        try:
+            pr = payload.get("pullrequest", {})
+            repo = payload.get("repository", {})
+
+            workspace = (
+                    repo.get("workspace", {}).get("slug") or
+                    repo.get("project", {}).get("key") or
+                    repo.get("owner", {}).get("username")
+            )
+
+            repo_slug = repo.get("slug") or repo.get("name")
+            pr_id = pr.get("id")
+
+            if all([workspace, repo_slug, pr_id]):
+                return PullRequestInfo(
+                    workspace=workspace,
+                    repo_slug=repo_slug,
+                    pr_id=pr_id
+                )
+
+        except Exception as e:
+            logger.error(f"Error extracting PR info: {e}")
+
+        return None
+
+    @staticmethod
+    def extract_comment_info(payload: Dict[str, Any]) -> Optional[CommentInfo]:
+        """
+        Extract comment information from Bitbucket webhook payload
+
+        Args:
+            payload: Webhook payload from Bitbucket
+
+        Returns:
+            CommentInfo if valid comment data found, None otherwise
+        """
+        try:
+            comment = payload.get("comment", {})
+            pr = payload.get("pullrequest", {})
+            repo = payload.get("repository", {})
+
+            workspace = (
+                    repo.get("workspace", {}).get("slug") or
+                    repo.get("project", {}).get("key") or
+                    repo.get("owner", {}).get("username")
+            )
+
+            repo_slug = repo.get("slug") or repo.get("name")
+            pr_id = pr.get("id")
+            comment_text = comment.get("content", {}).get("raw", "")
+            comment_id = comment.get("id")
+            author = comment.get("user", {}).get("display_name", "")
+
+            if all([workspace, repo_slug, pr_id, comment_text, comment_id]):
+                return CommentInfo(
+                    workspace=workspace,
+                    repo_slug=repo_slug,
+                    pr_id=pr_id,
+                    comment_text=comment_text,
+                    comment_id=comment_id,
+                    author=author
+                )
+
+        except Exception as e:
+            logger.error(f"Error extracting comment info: {e}")
+
+        return None
+
+
+class AssistantCommandParser:
+    """Parses and handles assistant commands"""
+
+    COMMAND_PREFIX = "/assistant"
+
+    @classmethod
+    def is_assistant_command(cls, comment_text: str) -> bool:
+        """Check if comment contains assistant command"""
+        return comment_text.strip().lower().startswith(cls.COMMAND_PREFIX.lower())
+
+    @classmethod
+    def parse_command(cls, comment_text: str) -> Dict[str, Any]:
+        """
+        Parse assistant command and extract action and context
+
+        Args:
+            comment_text: Raw comment text
+
+        Returns:
+            Dictionary with action and context
+        """
+        text = comment_text.strip().lower()
+
+        # Remove command prefix
+        if text.startswith(cls.COMMAND_PREFIX.lower()):
+            text = text[len(cls.COMMAND_PREFIX):].strip()
+
+        # Parse different commands
+        if not text:
+            return {"action": AssistantCommand.REVIEW.value}
+        elif "suggestion" in text or "improve" in text:
+            return {"action": AssistantCommand.SUGGESTION.value, "context": text}
+        elif "explain" in text:
+            return {"action": AssistantCommand.EXPLAIN.value, "context": text}
+        elif "security" in text or "secure" in text:
+            return {"action": AssistantCommand.SECURITY.value}
+        elif "summarize" in text or "summary" in text:
+            return {"action": AssistantCommand.SUMMARIZE.value}
+        elif "test" in text:
+            return {"action": AssistantCommand.TEST.value}
+        elif "help" in text:
+            return {"action": AssistantCommand.HELP.value}
+        else:
+            return {"action": AssistantCommand.HELP.value}
+
+
+class BitbucketAPIClient:
+    """Handles Bitbucket API interactions"""
+
+    def __init__(self):
+        self.base_url = "https://api.bitbucket.org/2.0"
+        self.auth = (settings.BITBUCKET_USERNAME, settings.BITBUCKET_APP_PASSWORD)
+
+    async def post_comment(self, workspace: str, repo: str, pr_id: int,
+                           content: str, parent_id: Optional[int] = None,
+                           inline_data: Optional[Dict] = None) -> bool:
+        """
+        Post a comment to a pull request
+
+        Args:
+            workspace: Bitbucket workspace
+            repo: Repository name
+            pr_id: Pull request ID
+            content: Comment content
+            parent_id: Parent comment ID for replies
+            inline_data: Inline comment data (file, line)
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            url = f"{self.base_url}/repositories/{workspace}/{repo}/pullrequests/{pr_id}/comments"
+
+            data = {"content": {"raw": content}}
+
+            if parent_id:
+                data["parent"] = {"id": parent_id}
+
+            if inline_data:
+                data["inline"] = inline_data
+
+            response = requests.post(url, auth=self.auth, json=data, timeout=30)
+            response.raise_for_status()
+
+            logger.info(f"Posted comment to {workspace}/{repo}/PR-{pr_id}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Error posting comment: {e}")
+            return False
+
+    async def post_inline_comments(self, workspace: str, repo: str, pr_id: int,
+                                   inline_comments: List[Dict]) -> int:
+        """
+        Post multiple inline comments
+
+        Returns:
+            Number of successfully posted comments
+        """
+        success_count = 0
+
+        for comment in inline_comments:
+            if all(key in comment for key in ("file", "line", "comment")):
+                inline_data = {"path": comment["file"], "to": comment["line"]}
+                content = f"🤖 **AI Review**: {comment['comment']}"
+
+                if await self.post_comment(workspace, repo, pr_id, content,
+                                           inline_data=inline_data):
+                    success_count += 1
+
+        return success_count
+
+
+class AssistantService:
+    """Main service for handling assistant operations"""
+
+    def __init__(self):
+        self.api_client = BitbucketAPIClient()
+
+    async def handle_command(self, comment_info: CommentInfo, command: Dict[str, Any]):
+        """
+        Handle assistant command
+
+        Args:
+            comment_info: Comment information
+            command: Parsed command dictionary
+        """
+        action = command.get("action")
+        context = command.get("context", "")
+
+        try:
+            if action == AssistantCommand.REVIEW.value:
+                await self._perform_full_review(comment_info)
+            elif action == AssistantCommand.SUGGESTION.value:
+                await self._provide_suggestions(comment_info, context)
+            elif action == AssistantCommand.EXPLAIN.value:
+                await self._explain_changes(comment_info, context)
+            elif action == AssistantCommand.SECURITY.value:
+                await self._security_analysis(comment_info)
+            elif action == AssistantCommand.SUMMARIZE.value:
+                await self._summarize_pr(comment_info)
+            elif action == AssistantCommand.TEST.value:
+                await self._suggest_tests(comment_info)
+            else:
+                await self._show_help(comment_info)
+
+        except Exception as e:
+            logger.exception(f"Error handling command {action}: {e}")
+            await self._reply_with_error(comment_info)
+
+    async def _perform_full_review(self, comment_info: CommentInfo):
+        """Perform comprehensive PR review"""
+        repo_service = RepoServiceFactory.create_service("bitbucket")
+        pr_data = await repo_service.get_pr_diff(
+            comment_info.workspace, comment_info.repo_slug, comment_info.pr_id
+        )
+
+        review_result = await llm_service.review_inline_pr(
+            pr_data, settings.DEFAULT_LLM_PROVIDER
+        )
+
+        # Post general review comment
+        general_comment = f"""🤖 **AI Code Review Complete**
+
+{review_result.get('general_comment', 'Review completed successfully.')}
+
+---
+*Review generated by Bitbucket AI Assistant*"""
+
+        await self.api_client.post_comment(
+            comment_info.workspace, comment_info.repo_slug, comment_info.pr_id,
+            general_comment, comment_info.comment_id
+        )
+
+        # Post inline comments
+        inline_count = await self.api_client.post_inline_comments(
+            comment_info.workspace, comment_info.repo_slug, comment_info.pr_id,
+            review_result.get("inline_comments", [])
+        )
+
+        logger.info(f"Posted {inline_count} inline comments for PR review")
+
+    async def _provide_suggestions(self, comment_info: CommentInfo, context: str):
+        """Provide code improvement suggestions"""
+        repo_service = RepoServiceFactory.create_service("bitbucket")
+        pr_data = await repo_service.get_pr_diff(
+            comment_info.workspace, comment_info.repo_slug, comment_info.pr_id
+        )
+
+        prompt = f"Provide specific code improvement suggestions. Context: {context}" if context else "Provide code improvement suggestions"
+        suggestions = await llm_service.get_suggestions(pr_data, prompt)
+
+        response = f"""💡 **Code Suggestions**
+
+{suggestions}
+
+---
+*Suggestions by AI Assistant*"""
+
+        await self.api_client.post_comment(
+            comment_info.workspace, comment_info.repo_slug, comment_info.pr_id,
+            response, comment_info.comment_id
+        )
+
+    async def _explain_changes(self, comment_info: CommentInfo, context: str):
+        """Explain changes in the PR"""
+        repo_service = RepoServiceFactory.create_service("bitbucket")
+        pr_data = await repo_service.get_pr_diff(
+            comment_info.workspace, comment_info.repo_slug, comment_info.pr_id
+        )
+
+        prompt = f"Explain changes focusing on: {context}" if context else "Explain the changes and their impact"
+        explanation = await llm_service.explain_changes(pr_data, prompt)
+
+        response = f"""📖 **Change Explanation**
+
+{explanation}
+
+---
+*Explanation by AI Assistant*"""
+
+        await self.api_client.post_comment(
+            comment_info.workspace, comment_info.repo_slug, comment_info.pr_id,
+            response, comment_info.comment_id
+        )
+
+    async def _security_analysis(self, comment_info: CommentInfo):
+        """Perform security analysis"""
+        repo_service = RepoServiceFactory.create_service("bitbucket")
+        pr_data = await repo_service.get_pr_diff(
+            comment_info.workspace, comment_info.repo_slug, comment_info.pr_id
+        )
+
+        security_analysis = await llm_service.security_analysis(pr_data)
+
+        response = f"""🔒 **Security Analysis**
+
+{security_analysis}
+
+---
+*Security analysis by AI Assistant*"""
+
+        await self.api_client.post_comment(
+            comment_info.workspace, comment_info.repo_slug, comment_info.pr_id,
+            response, comment_info.comment_id
+        )
+
+    async def _summarize_pr(self, comment_info: CommentInfo):
+        """Summarize PR changes"""
+        repo_service = RepoServiceFactory.create_service("bitbucket")
+        pr_data = await repo_service.get_pr_diff(
+            comment_info.workspace, comment_info.repo_slug, comment_info.pr_id
+        )
+
+        summary = await llm_service.summarize_pr(pr_data)
+
+        response = f"""📋 **PR Summary**
+
+{summary}
+
+---
+*Summary by AI Assistant*"""
+
+        await self.api_client.post_comment(
+            comment_info.workspace, comment_info.repo_slug, comment_info.pr_id,
+            response, comment_info.comment_id
+        )
+
+    async def _suggest_tests(self, comment_info: CommentInfo):
+        """Suggest test cases"""
+        repo_service = RepoServiceFactory.create_service("bitbucket")
+        pr_data = await repo_service.get_pr_diff(
+            comment_info.workspace, comment_info.repo_slug, comment_info.pr_id
+        )
+
+        test_suggestions = await llm_service.suggest_tests(pr_data)
+
+        response = f"""🧪 **Test Suggestions**
+
+{test_suggestions}
+
+---
+*Test suggestions by AI Assistant*"""
+
+        await self.api_client.post_comment(
+            comment_info.workspace, comment_info.repo_slug, comment_info.pr_id,
+            response, comment_info.comment_id
+        )
+
+    async def _show_help(self, comment_info: CommentInfo):
+        """Show available commands"""
+        help_text = """🤖 **AI Assistant Commands**
+
+Available commands:
+- `/assistant` or `/assistant review` - Full PR review
+- `/assistant suggestion` - Get code improvement suggestions  
+- `/assistant explain [topic]` - Explain changes
+- `/assistant security` - Security analysis
+- `/assistant summarize` - Summarize PR changes
+- `/assistant test` - Suggest test cases
+- `/assistant help` - Show this help
+
+---
+*Your AI-powered code review assistant*"""
+
+        await self.api_client.post_comment(
+            comment_info.workspace, comment_info.repo_slug, comment_info.pr_id,
+            help_text, comment_info.comment_id
+        )
+
+    async def _reply_with_error(self, comment_info: CommentInfo):
+        """Reply with error message"""
+        error_text = """❌ **Error**
+
+Sorry, I encountered an error processing your request. Please try again or contact support.
+
+---
+*AI Assistant*"""
+
+        await self.api_client.post_comment(
+            comment_info.workspace, comment_info.repo_slug, comment_info.pr_id,
+            error_text, comment_info.comment_id
+        )
+
+
+# Initialize services
+assistant_service = AssistantService()
+webhook_processor = WebhookProcessor()
+
+
+@app.get("/")
+async def root():
+    """Health check endpoint"""
+    return {
+        "status": "healthy",
+        "service": "Bitbucket AI Assistant",
+        "version": "1.0.0"
+    }
+
+
+@app.get("/health")
+async def health_check():
+    """Detailed health check"""
+    return {
+        "status": "healthy",
+        "timestamp": "2025-08-05T18:30:00Z",
+        "services": {
+            "llm_service": "active",
+            "bitbucket_api": "active"
         }
-    return None
+    }
+
 
 @app.post("/bitbucket-webhook")
 async def bitbucket_webhook(request: Request, background_tasks: BackgroundTasks):
-    print("bitbucket webhook received")
+    """
+    Main webhook endpoint for Bitbucket events
+    Handles PR events and comment-based assistant commands
+    """
+    logger.info("🔔 Bitbucket webhook received")
+
     try:
         payload = await request.json()
-    except Exception:
-        payload = None
+    except Exception as e:
+        logger.error(f"Invalid JSON payload: {e}")
+        return JSONResponse(
+            content={"status": "error", "detail": "Invalid JSON payload"},
+            status_code=400
+        )
 
-    # Require a JSON body
     if not payload:
-        return JSONResponse(content={"status": "ignored", "detail": "No payload"}, status_code=200)
+        return JSONResponse(
+            content={"status": "ignored", "detail": "Empty payload"},
+            status_code=200
+        )
 
     event_key = request.headers.get("X-Event-Key", "")
-    print(f"printing event key:{event_key}")
-    # Handle PR events (existing logic)
-    if event_key.startswith("pullrequest:") and event_key not in ["pullrequest:comment_created", "pullrequest:comment_updated"]:
-        info = extract_info(payload)
-        if not info:
-            return JSONResponse(content={
-                "status": "error",
-                "detail": "Missing PR data"
-            }, status_code=400)
+    logger.info(f"📨 Processing event: {event_key}")
 
-        background_tasks.add_task(
-            review_and_comment, info["workspace"], info["repo_slug"], info["pr_id"]
-        )
-        return JSONResponse(content={"status": "review started", "pr": info}, status_code=202)
+    # Handle PR lifecycle events (auto-review)
+    if event_key in [EventType.PR_CREATED.value, EventType.PR_UPDATED.value]:
+        pr_info = webhook_processor.extract_pr_info(payload)
 
-    # NEW: Handle comment events
-    elif event_key in ["pullrequest:comment_created", "pullrequest:comment_updated"]:
-        comment_info = extract_comment_info(payload)
-        if comment_info and is_assistant_command(comment_info["comment_text"]):
-            background_tasks.add_task(
-                handle_assistant_command,
-                comment_info["workspace"],
-                comment_info["repo_slug"],
-                comment_info["pr_id"],
-                comment_info["comment_text"],
-                comment_info["comment_id"]
+        if not pr_info:
+            return JSONResponse(
+                content={"status": "error", "detail": "Invalid PR data"},
+                status_code=400
             )
-            return JSONResponse(content={"status": "assistant command processed"}, status_code=202)
-    return JSONResponse(content={"status": "ignored", "detail": f"Event {event_key} not processed"}, status_code=200)
 
+        # Add automatic review task
+        background_tasks.add_task(
+            perform_automatic_review, pr_info
+        )
 
-def extract_comment_info(payload: dict) -> Optional[dict]:
-    """Extract comment info from Bitbucket webhook payload"""
-    comment = payload.get("comment", {})
-    pr = payload.get("pullrequest", {})
-    repo = payload.get("repository", {})
+        logger.info(f"🚀 Scheduled automatic review for {pr_info}")
+        return JSONResponse(
+            content={
+                "status": "review_scheduled",
+                "pr": str(pr_info),
+                "event": event_key
+            },
+            status_code=202
+        )
 
-    workspace = (
-            repo.get("workspace", {}).get("slug")
-            or repo.get("project", {}).get("key")
-            or repo.get("owner", {}).get("username")
+    # Handle comment-based assistant commands
+    elif event_key in [EventType.PR_COMMENT_CREATED.value, EventType.PR_COMMENT_UPDATED.value]:
+        comment_info = webhook_processor.extract_comment_info(payload)
+
+        if not comment_info:
+            return JSONResponse(
+                content={"status": "ignored", "detail": "Invalid comment data"},
+                status_code=200
+            )
+
+        # Check if it's an assistant command
+        if AssistantCommandParser.is_assistant_command(comment_info.comment_text):
+            command = AssistantCommandParser.parse_command(comment_info.comment_text)
+
+            # Add command handling task
+            background_tasks.add_task(
+                assistant_service.handle_command, comment_info, command
+            )
+
+            logger.info(f"🤖 Processing assistant command: {command['action']} for {comment_info}")
+            return JSONResponse(
+                content={
+                    "status": "command_processing",
+                    "command": command['action'],
+                    "comment": str(comment_info)
+                },
+                status_code=202
+            )
+
+    # Event not handled
+    logger.info(f"⏭️ Ignoring event: {event_key}")
+    return JSONResponse(
+        content={"status": "ignored", "detail": f"Event {event_key} not processed"},
+        status_code=200
     )
-    repo_slug = repo.get("slug") or repo.get("name")
-    pr_id = pr.get("id")
-    comment_text = comment.get("content", {}).get("raw", "")
-    comment_id = comment.get("id")
-
-    if workspace and repo_slug and pr_id and comment_text:
-        return {
-            "workspace": workspace,
-            "repo_slug": repo_slug,
-            "pr_id": pr_id,
-            "comment_text": comment_text,
-            "comment_id": comment_id
-        }
-    return None
 
 
-def is_assistant_command(comment_text: str) -> bool:
-    """Check if comment contains assistant command"""
-    return comment_text.strip().startswith("/assistant")
-
-
-async def handle_assistant_command(workspace: str, repo: str, pr_id: int, comment_text: str, comment_id: int):
-    """Process assistant commands"""
+async def perform_automatic_review(pr_info: PullRequestInfo):
+    """
+    Perform automatic PR review (similar to GitHub Copilot auto-review)
+    """
     try:
-        command = parse_assistant_command(comment_text)
+        logger.info(f"🔍 Starting automatic review for {pr_info}")
 
-        if command["action"] == "review":
-            await perform_full_review(workspace, repo, pr_id, comment_id)
-        elif command["action"] == "suggestion":
-            await provide_suggestions(workspace, repo, pr_id, comment_id, command.get("context"))
-        elif command["action"] == "explain":
-            await explain_changes(workspace, repo, pr_id, comment_id, command.get("context"))
-        elif command["action"] == "security":
-            await security_analysis(workspace, repo, pr_id, comment_id)
-        else:
-            await reply_to_comment(workspace, repo, pr_id, comment_id,
-                                   "Available commands:\n- `/assistant` - Full review\n- `/assistant suggestion` - Get suggestions\n- `/assistant explain [topic]` - Explain changes\n- `/assistant security` - Security analysis")
-
-    except Exception as e:
-        logging.exception(f"Error handling assistant command: {e}")
-        await reply_to_comment(workspace, repo, pr_id, comment_id,
-                               "Sorry, I encountered an error processing your request.")
-
-
-def parse_assistant_command(comment_text: str) -> dict:
-    """Parse assistant command and extract action and context"""
-    text = comment_text.strip()
-
-    # Remove /assistant prefix
-    if text.startswith("/assistant"):
-        text = text[10:].strip()
-
-    if not text or text == "":
-        return {"action": "review"}
-    elif "suggestion" in text.lower():
-        return {"action": "suggestion", "context": text[10:].strip()}
-    elif "explain" in text.lower():
-        return {"action": "explain", "context": text[7:].strip()}
-    elif "security" in text.lower():
-        return {"action": "security"}
-    else:
-        return {"action": "help"}
-
-async def review_and_comment(owner, repo, pr_number):
-    try:
-        print("Inside review_and_comment()")
         repo_service = RepoServiceFactory.create_service("bitbucket")
-        pr_data = await repo_service.get_pr_diff(owner, repo, pr_number)
+        pr_data = await repo_service.get_pr_diff(
+            pr_info.workspace, pr_info.repo_slug, pr_info.pr_id
+        )
 
-        # Use your LLM's updated inline-aware review method!
+        # Get AI review
         review_result = await llm_service.review_inline_pr(
             pr_data, settings.DEFAULT_LLM_PROVIDER
         )
 
-        # Post general comment
+        api_client = BitbucketAPIClient()
+
+        # Post general review comment
         if review_result.get("general_comment"):
-            url = f"https://api.bitbucket.org/2.0/repositories/{owner}/{repo}/pullrequests/{pr_number}/comments"
-            data = {"content": {"raw": review_result["general_comment"]}}
-            auth = (settings.BITBUCKET_USERNAME, settings.BITBUCKET_APP_PASSWORD)
-            resp = requests.post(url, auth=auth, json=data)
-            resp.raise_for_status()
-            print("Posted general comment.")
+            general_comment = f"""🤖 **Automatic AI Review**
 
-        # Post each inline comment
-        for c in review_result.get("inline_comments", []):
-            if all(k in c for k in ("file", "line", "comment")):
-                url = f"https://api.bitbucket.org/2.0/repositories/{owner}/{repo}/pullrequests/{pr_number}/comments"
-                data = {
-                    "content": {"raw": c["comment"]},
-                    "inline": {"path": c["file"], "to": c["line"]}
-                }
-                resp = requests.post(url, auth=auth, json=data)
-                resp.raise_for_status()
-                print(f"Posted inline comment to {c['file']}:{c['line']}.")
+{review_result["general_comment"]}
 
-        print(f"Posted all comments for PR {pr_number} of {owner}/{repo}.")
+---
+*Automatic review by AI Assistant • Use `/assistant help` for more commands*"""
 
-    except Exception as e:
-        logging.exception(f"Webhook review_and_comment error: {e}")
-
-
-async def perform_full_review(workspace: str, repo: str, pr_id: int, comment_id: int):
-    """Perform full PR review"""
-    try:
-        repo_service = RepoServiceFactory.create_service("bitbucket")
-        pr_data = await repo_service.get_pr_diff(workspace, repo, pr_id)
-
-        review_result = await llm_service.review_inline_pr(
-            pr_data, settings.DEFAULT_LLM_PROVIDER
-        )
-
-        response_text = f"🤖 **Full PR Review Completed**\n\n{review_result.get('general_comment', 'Review completed successfully.')}"
-        await reply_to_comment(workspace, repo, pr_id, comment_id, response_text, settings.DEFAULT_LLM_PROVIDER)
+            await api_client.post_comment(
+                pr_info.workspace, pr_info.repo_slug, pr_info.pr_id,
+                general_comment
+            )
 
         # Post inline comments
-        for c in review_result.get("inline_comments", []):
-            if all(k in c for k in ("file", "line", "comment")):
-                url = f"https://api.bitbucket.org/2.0/repositories/{workspace}/{repo}/pullrequests/{pr_id}/comments"
-                data = {
-                    "content": {"raw": f"🤖 **Assistant Review**: {c['comment']}"},
-                    "inline": {"path": c["file"], "to": c["line"]}
-                }
-                auth = (settings.BITBUCKET_USERNAME, settings.BITBUCKET_APP_PASSWORD)
-                resp = requests.post(url, auth=auth, json=data)
-                resp.raise_for_status()
+        inline_count = await api_client.post_inline_comments(
+            pr_info.workspace, pr_info.repo_slug, pr_info.pr_id,
+            review_result.get("inline_comments", [])
+        )
+
+        logger.info(f"✅ Completed automatic review for {pr_info} - {inline_count} inline comments")
 
     except Exception as e:
-        logging.exception(f"Error in full review: {e}")
-        await reply_to_comment(workspace, repo, pr_id, comment_id, "Error performing review.")
+        logger.exception(f"❌ Error in automatic review for {pr_info}: {e}")
 
 
-async def provide_suggestions(workspace: str, repo: str, pr_id: int, comment_id: int, context: str = ""):
-    """Provide code suggestions"""
-    try:
-        repo_service = RepoServiceFactory.create_service("bitbucket")
-        pr_data = await repo_service.get_pr_diff(workspace, repo, pr_id)
-
-        # Create a suggestion-focused prompt
-        suggestion_prompt = f"Provide specific code improvement suggestions for this PR. Focus on: {context}" if context else "Provide specific code improvement suggestions for this PR."
-
-        suggestions = await llm_service.get_suggestions(pr_data, suggestion_prompt)
-
-        response_text = f"💡 **Code Suggestions**\n\n{suggestions}"
-        await reply_to_comment(workspace, repo, pr_id, comment_id, response_text)
-
-    except Exception as e:
-        logging.exception(f"Error providing suggestions: {e}")
-        await reply_to_comment(workspace, repo, pr_id, comment_id, "Error generating suggestions.")
+# Error handlers
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"status": "error", "detail": exc.detail}
+    )
 
 
-async def explain_changes(workspace: str, repo: str, pr_id: int, comment_id: int, context: str = ""):
-    """Explain changes in the PR"""
-    try:
-        repo_service = RepoServiceFactory.create_service("bitbucket")
-        pr_data = await repo_service.get_pr_diff(workspace, repo, pr_id)
-
-        explanation_prompt = f"Explain the changes in this PR, focusing on: {context}" if context else "Explain what changes were made in this PR and their impact."
-
-        explanation = await llm_service.explain_changes(pr_data, explanation_prompt)
-
-        response_text = f"📖 **Change Explanation**\n\n{explanation}"
-        await reply_to_comment(workspace, repo, pr_id, comment_id, response_text)
-
-    except Exception as e:
-        logging.exception(f"Error explaining changes: {e}")
-        await reply_to_comment(workspace, repo, pr_id, comment_id, "Error explaining changes.")
-
-
-async def security_analysis(workspace: str, repo: str, pr_id: int, comment_id: int):
-    """Perform security analysis"""
-    try:
-        repo_service = RepoServiceFactory.create_service("bitbucket")
-        pr_data = await repo_service.get_pr_diff(workspace, repo, pr_id)
-
-        security_issues = await llm_service.security_analysis(pr_data)
-
-        response_text = f"🔒 **Security Analysis**\n\n{security_issues}"
-        await reply_to_comment(workspace, repo, pr_id, comment_id, response_text)
-
-    except Exception as e:
-        logging.exception(f"Error in security analysis: {e}")
-        await reply_to_comment(workspace, repo, pr_id, comment_id, "Error performing security analysis.")
-
-
-async def reply_to_comment(workspace: str, repo: str, pr_id: int, comment_id: int, message: str, llm_provider: str = settings.DEFAULT_LLM_PROVIDER):
-    """Reply to a specific comment"""
-    url = f"https://api.bitbucket.org/2.0/repositories/{workspace}/{repo}/pullrequests/{pr_id}/comments"
-    data = {
-        "content": {"raw": message},
-        "parent": {"id": comment_id}  # This makes it a reply
-    }
-    auth = (settings.BITBUCKET_USERNAME, settings.BITBUCKET_APP_PASSWORD)
-    resp = requests.post(url, auth=auth, json=data)
-    resp.raise_for_status()
+@app.exception_handler(Exception)
+async def general_exception_handler(request: Request, exc: Exception):
+    logger.exception(f"Unhandled exception: {exc}")
+    return JSONResponse(
+        status_code=500,
+        content={"status": "error", "detail": "Internal server error"}
+    )
 
 
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8050)
+    logger.info("🚀 Starting Bitbucket AI Assistant")
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=8050,
+        log_level="info"
+    )
 
-# uvicorn bitbucket_webhook_server:app --host 0.0.0.0 --port 8050
-#  cloudflared tunnel --url http://localhost:8050
+# To run:
+# uvicorn bitbucket_webhook_server:app --host 0.0.0.0 --port 8050 --reload
+# cloudflared tunnel --url http://localhost:8050

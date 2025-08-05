@@ -305,7 +305,7 @@ Be precise, helpful, and return only the JSON object as your entire response.
 
     async def get_suggestions(self, pr_data, prompt: str):
         """Generate code suggestions"""
-        full_prompt = f"{prompt}\n\nPR Diff:\n{pr_data.diff_text} \n\n Provide code suggestions based on the changes made in this PR."
+        full_prompt = f"{prompt}\n\nPR Diff:\n{pr_data} \n\n Provide code suggestions based on the changes made in this PR."
         provider = self.providers[settings.DEFAULT_LLM_PROVIDER]
         # Use your existing LLM call logic
         response = await provider.analyze_pr(full_prompt)
@@ -313,14 +313,14 @@ Be precise, helpful, and return only the JSON object as your entire response.
 
     async def explain_changes(self, pr_data, prompt: str):
         """Explain PR changes"""
-        full_prompt = f"{prompt}\n\nPR Diff:\n{pr_data.diff}\n\n Provide a detailed explanation of the changes made in this PR."
+        full_prompt = f"{prompt}\n\nPR Diff:\n{pr_data}\n\n Provide a detailed explanation of the changes made in this PR."
         provider = self.providers[settings.DEFAULT_LLM_PROVIDER]
         response = await provider.analyze_pr(full_prompt)
         return response
 
     async def security_analysis(self, pr_data):
         """Perform security analysis"""
-        full_prompt = f"Analyze this code diff for security vulnerabilities, potential security issues, and provide recommendations:\n\n{pr_data.diff_text}"
+        full_prompt = f"Analyze this code diff for security vulnerabilities, potential security issues, and provide recommendations:\n\n{pr_data}"
         provider = self.providers[settings.DEFAULT_LLM_PROVIDER]
         response = await provider.analyze_pr(full_prompt)
         return response
